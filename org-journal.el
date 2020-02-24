@@ -711,29 +711,34 @@ items, and delete or not delete the empty entry/file based on
 Will insert `entries', and delete the inserted entries from `prev-buffer'.
 If the parent heading has no more content delete it is well."
   (when entries
-    (when (org-journal-org-heading-p)
-      (outline-end-of-subtree))
+    (while (org-up-heading-safe))
+    (outline-next-heading)
 
     (unless (eq (current-column) 0) (insert "\n"))
 
     (mapc (lambda (x) (insert (cddr x))) entries)
 
-    ;; Delete carryover items
-    (with-current-buffer prev-buffer
-      (mapc (lambda (x)
-              (kill-region (car x) (cadr x)))
-            (reverse (cdr entries)))
-      ;; Delete parent heading if it has no content
-      (let ((parent-heading-start (caar entries))
-            (parent-heading-end (cadar entries))
-            subtree-length)
-        (save-excursion
-          (goto-char parent-heading-start)
-          (outline-end-of-subtree)
-          (setq subtree-length (- (point) parent-heading-start)))
-        (when (eq subtree-length (- parent-heading-end parent-heading-start))
-          (kill-region parent-heading-start parent-heading-end)))
-      (save-buffer))))
+    (let ((has-parent (> (length entries) 1)))
+      ;; Delete carryover items
+      (with-current-buffer prev-buffer
+        (mapc (lambda (x)
+                (kill-region (car x) (cadr x)))
+              (reverse (if has-parent (cdr entries) entries)))
+
+        ;; Delete parent heading if it has no content
+        (when has-parent
+          (let ((parent-heading-start (caar entries))
+                (parent-heading-end (cadar entries))
+                subtree-length)
+            (save-excursion
+             (goto-char parent-heading-start)
+             (save-restriction
+              (unless (org-journal-daily-p)
+                (org-narrow-to-subtree))
+              (outline-end-of-subtree)
+              (setq subtree-length (- (point) parent-heading-start))))
+            (when (eq subtree-length (1- (- parent-heading-end parent-heading-start)))
+              (kill-region parent-heading-start parent-heading-end))))))))
 
 (defun org-journal-carryover ()
   "Moves all items matching `org-journal-carryover-items' from the
@@ -747,26 +752,38 @@ previous day's file to the current file."
                      ;; in the search
                      (setq org-map-continue-from (point))
                      headings)))
-         entries prev-buffer)
+         entries carryover-paths prev-buffer)
+
     (save-excursion
       (save-restriction
         (when (let ((inhibit-message t))
                 (org-journal-open-previous-entry 'no-select))
           (setq prev-buffer (current-buffer))
-          (unless (org-journal-daily-p) ;; (org-journal-org-heading-p) should work to
+          (unless (org-journal-daily-p)
             (org-narrow-to-subtree))
-          ;; Create a sorted list with duplicates removed from the value returned
-          ;; from `org-map-entries'. The returned value from `org-map-entries',
-          ;; is a list where each element is list containing points, which are representing
-          ;; the headers to carryover -- cddr contains the text.
+          (mapc (lambda (carryover-path)
+                  (if carryover-paths
+                      ;; loop over current paths and check if car and cadar matches if it does add cadr to that list else push entire thing to carryover-paths
+                      (mapc (lambda (carryover-path)
+                              (unless (and (eq (caar carryover-path) entries))
+                                (push heading entries)))
+                            carryover-paths)
+                    (push carryover-path carryover-paths)))
+                (org-map-entries mapper org-journal-carryover-items))
           (mapc (lambda (carryover-path)
                   (mapc (lambda (heading)
-                          (unless (member heading entries) (push heading entries)))
+                          (unless (member heading entries)
+                            (push heading entries)))
                         carryover-path))
-                (org-map-entries mapper org-journal-carryover-items))
-          (setq entries (sort entries (lambda (x y) (< (car x) (car y))))))))
+                (org-map-entries mapper org-journal-carryover-items)))))
+
     (when prev-buffer
+      (setq entries (sort entries (lambda (x y) (< (car x) (car y)))))
       (org-journal-carryover-items entries prev-buffer)
+      (while (org-up-heading-safe))
+      (outline-end-of-subtree)
+      (with-current-buffer prev-buffer
+        (save-buffer))
       (org-journal-carryover-delete-empty-journal prev-buffer)
       (when org-journal--kill-buffer
         (kill-buffer prev-buffer)))))
